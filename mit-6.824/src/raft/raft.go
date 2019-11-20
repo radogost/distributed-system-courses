@@ -192,6 +192,10 @@ type AppendEntriesArgs struct {
 type AppendEntriesReply struct {
 	Term    int  // currentTerm, for leader to update itself
 	Success bool // true if follower contained entry matching prevLogIndex and prevLogTerm
+
+	// Optimization to reduce number of rejected AppendEntries RPCs
+	ConflictTerm  int
+	ConflictIndex int
 }
 
 // AppendEntries RPC handler
@@ -214,12 +218,23 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.PrevLogIndex >= len(rf.logs) { // §5.3, no entry at prevLogIndex
 		reply.Term = rf.currentTerm
 		reply.Success = false
+
+		reply.ConflictIndex = len(rf.logs)
 		return
 	}
 
 	if rf.logs[args.PrevLogIndex].Term != args.PrevLogTerm { // §5.3, different terms at prevLogIndex
 		reply.Term = rf.currentTerm
 		reply.Success = false
+
+		conflictTerm := rf.logs[args.PrevLogIndex].Term
+		conflictIndex := args.PrevLogIndex
+		for rf.logs[conflictIndex-1].Term == conflictTerm {
+			conflictIndex--
+		}
+
+		reply.ConflictTerm = conflictTerm
+		reply.ConflictIndex = conflictIndex
 		return
 	}
 
@@ -577,7 +592,7 @@ func (rf *Raft) runLeader() {
 	rf.matchIndex = make([]int, len(rf.peers))
 	rf.sendingAppendEntries = make([]bool, len(rf.peers))
 
-	nextIndex := len(rf.logs) + 1
+	nextIndex := len(rf.logs)
 	for i := range rf.peers {
 		rf.nextIndex[i] = nextIndex
 		rf.matchIndex[i] = 0
@@ -609,12 +624,14 @@ func (rf *Raft) replicateLogEntries() {
 		return
 	}
 
-	prevLogIndex, prevLogTerm := rf.LastEntry()
-
 	for i := range rf.peers {
 		if i == rf.me {
 			continue
 		}
+		nextIdx := rf.nextIndex[i]
+		prevLogIndex := nextIdx - 1
+		prevLogTerm := rf.logs[prevLogIndex].Term
+
 		go rf.replicateLogEntriesToPeer(i, prevLogIndex, prevLogTerm)
 	}
 }
@@ -700,12 +717,26 @@ func (rf *Raft) replicateLogEntriesToPeer(peer int, prevLogIndex int, prevLogTer
 			}
 
 		} else { // Follower does not contain entry matching prevLogIndex and prevLogTerm
-			// §5.3 LogInconsistency: decrement nextIndex and retry
-			rf.nextIndex[peer] = prevLogIndex
-			logEntry := rf.logs[prevLogIndex-1]
-			prevLogIndexToSend := logEntry.Index
-			prevLogTermToSend := logEntry.Term
+			var nextIndex int
+			if reply.ConflictTerm > 0 {
+				nextIndex = 1
+				for nextIndex < len(rf.logs) && rf.logs[nextIndex].Term < reply.ConflictTerm {
+					nextIndex += 1
+				}
 
+				if nextIndex == len(rf.logs) || rf.logs[nextIndex].Term != reply.ConflictTerm {
+					nextIndex = reply.ConflictIndex
+				}
+			} else if reply.ConflictIndex > 0 {
+				nextIndex = reply.ConflictIndex
+			} else {
+				// §5.3 LogInconsistency: decrement nextIndex and retry
+				nextIndex = prevLogIndex
+			}
+
+			rf.nextIndex[peer] = nextIndex
+			prevLogIndexToSend := nextIndex - 1
+			prevLogTermToSend := rf.logs[prevLogIndexToSend].Term
 			go rf.replicateLogEntriesToPeer(peer, prevLogIndexToSend, prevLogTermToSend)
 		}
 	}()
