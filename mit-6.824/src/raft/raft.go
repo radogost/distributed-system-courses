@@ -18,8 +18,10 @@ package raft
 //
 
 import (
+	"bytes"
 	"fmt"
 	"io/ioutil"
+	"labgob"
 	"labrpc"
 	"log"
 	"os"
@@ -27,9 +29,6 @@ import (
 	"sync"
 	"time"
 )
-
-// import "bytes"
-// import "labgob"
 
 //
 // as each Raft peer becomes aware that successive log entries are
@@ -143,13 +142,13 @@ func (rf *Raft) LastEntry() (int, int) {
 //
 func (rf *Raft) persist() {
 	// Your code here (2C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// data := w.Bytes()
-	// rf.persister.SaveRaftState(data)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.logs)
+	data := w.Bytes()
+	rf.persister.SaveRaftState(data)
 }
 
 //
@@ -159,19 +158,24 @@ func (rf *Raft) readPersist(data []byte) {
 	if data == nil || len(data) < 1 { // bootstrap without any state?
 		return
 	}
-	// Your code here (2C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []LogEntry
+
+	if d.Decode(&currentTerm) != nil || d.Decode(&votedFor) != nil || d.Decode(&log) != nil {
+		rf.logger.Println("Could not restore persisted state!")
+		return
+	}
+
+	rf.mu.Lock()
+	defer rf.mu.Unlock()
+
+	rf.currentTerm = currentTerm
+	rf.votedFor = votedFor
+	rf.logs = log
 }
 
 // AppendEntries RPC arguments structure
@@ -223,7 +227,8 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if entry.Index >= len(rf.logs) { // Append new entries not already in the log
 			rf.logs = append(rf.logs, entry)
 		} else if entry.Term != rf.logs[entry.Index].Term { // §5.3, Replace on conflict
-			rf.logs[entry.Index] = entry
+			rf.logs = rf.logs[:entry.Index]
+			rf.logs = append(rf.logs, entry)
 		}
 	}
 
@@ -245,6 +250,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		}
 	}
 
+	rf.persist()
 	reply.Success = true
 	reply.Term = rf.currentTerm
 	rf.setLastContact()
@@ -340,6 +346,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	rf.setLastContact()
 	rf.serverState = Follower
 	rf.votedFor = args.CandidateId
+	rf.persist()
 	reply.VoteGranted = true
 }
 
@@ -681,6 +688,7 @@ func (rf *Raft) replicateLogEntriesToPeer(peer int, prevLogIndex int, prevLogTer
 						}
 					}
 					rf.lastApplied = rf.commitIndex
+					rf.persist()
 				}
 			}
 
