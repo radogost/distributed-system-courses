@@ -23,6 +23,7 @@ import (
 	"labrpc"
 	"log"
 	"os"
+	"sort"
 	"sync"
 	"time"
 )
@@ -86,6 +87,8 @@ type Raft struct {
 	// Volatile state on all leaders (Reinitialized after election)
 	nextIndex  []int // for each server, index of the next log entry to send to that server
 	matchIndex []int // for each server, index of highest log entry known to be replicated on server
+
+	sendingAppendEntries []bool
 }
 
 func (rf *Raft) Majority() int {
@@ -248,8 +251,35 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 }
 
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, reply *AppendEntriesReply) bool {
-	ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
-	return ok
+	rf.mu.Lock()
+	if rf.sendingAppendEntries[server] {
+		rf.mu.Unlock()
+		return false
+	}
+	rf.sendingAppendEntries[server] = true
+	rf.mu.Unlock()
+
+	// Although "Call" can timeout, the timeouts can be too big.
+	// Hence, we use our own.
+	respCh := make(chan bool)
+	timeout := time.After(time.Duration(200) * time.Millisecond)
+	go func() {
+		ok := rf.peers[server].Call("Raft.AppendEntries", args, reply)
+		respCh <- ok
+	}()
+
+	defer func() {
+		rf.mu.Lock()
+		defer rf.mu.Unlock()
+		rf.sendingAppendEntries[server] = false
+	}()
+
+	select {
+	case ok := <-respCh:
+		return ok
+	case <-timeout:
+		return false
+	}
 }
 
 //
@@ -538,11 +568,13 @@ func (rf *Raft) runLeader() {
 	// so that same indices refer to same servers
 	rf.nextIndex = make([]int, len(rf.peers))
 	rf.matchIndex = make([]int, len(rf.peers))
+	rf.sendingAppendEntries = make([]bool, len(rf.peers))
 
 	nextIndex := len(rf.logs) + 1
 	for i := range rf.peers {
 		rf.nextIndex[i] = nextIndex
 		rf.matchIndex[i] = 0
+		rf.sendingAppendEntries[i] = false
 	}
 	rf.mu.Unlock()
 
@@ -593,7 +625,7 @@ func (rf *Raft) replicateLogEntriesToPeer(peer int, prevLogIndex int, prevLogTer
 		LeaderId:     rf.me,
 		PrevLogIndex: prevLogIndex,
 		PrevLogTerm:  prevLogTerm,
-		Entries:      rf.logs[prevLogIndex:len(rf.logs)],
+		Entries:      rf.logs[prevLogIndex+1 : len(rf.logs)],
 		LeaderCommit: rf.commitIndex,
 	}
 
@@ -618,32 +650,37 @@ func (rf *Raft) replicateLogEntriesToPeer(peer int, prevLogIndex int, prevLogTer
 		}
 
 		if reply.Success {
-			rf.nextIndex[peer] = prevLogIndex + 1
-			rf.matchIndex[peer] = prevLogIndex
+			var nextIndex int
+			var matchIndex int
+			if len(args.Entries) == 0 {
+				nextIndex = args.PrevLogIndex + 1
+				matchIndex = args.PrevLogIndex
+			} else {
+				nextIndex = args.Entries[len(args.Entries)-1].Index + 1
+				matchIndex = args.Entries[len(args.Entries)-1].Index
+			}
+			rf.nextIndex[peer] = nextIndex
+			rf.matchIndex[peer] = matchIndex
 
-			// potential candidate for new log index
-			if rf.logs[prevLogIndex].Term == rf.currentTerm && prevLogIndex > rf.commitIndex { // §5.3, §5.4
-				// check if replicated on all servers
-				replicationCount := 0
-				for peer := range rf.peers {
-					if rf.matchIndex[peer] >= prevLogIndex {
-						replicationCount += 1
-					}
-				}
+			// §5.3, §5.4: Recompute commitIndex
+			// Store matchIndexes in a new slice, sort it.
+			// After sorting, we know that the middle element is replicated on majority
+			matchIndexes := make([]int, len(rf.matchIndex))
+			copy(matchIndexes, rf.matchIndex)
+			sort.Ints(matchIndexes)
+			majorityIndex := matchIndexes[(len(matchIndexes)-1)/2]
 
-				// replicated on majority, update commitIndex
-				if replicationCount >= rf.Majority() {
-					rf.commitIndex = prevLogIndex
-					if rf.commitIndex > rf.lastApplied {
-						for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
-							rf.applyCh <- ApplyMsg{
-								CommandValid: true,
-								Command:      rf.logs[i].Command,
-								CommandIndex: rf.logs[i].Index,
-							}
+			if majorityIndex > rf.commitIndex && rf.logs[majorityIndex].Term == rf.currentTerm {
+				rf.commitIndex = majorityIndex
+				if rf.commitIndex > rf.lastApplied {
+					for i := rf.lastApplied + 1; i <= rf.commitIndex; i++ {
+						rf.applyCh <- ApplyMsg{
+							CommandValid: true,
+							Command:      rf.logs[i].Command,
+							CommandIndex: rf.logs[i].Index,
 						}
-						rf.lastApplied = rf.commitIndex
 					}
+					rf.lastApplied = rf.commitIndex
 				}
 			}
 
