@@ -6,6 +6,7 @@ import (
 	"log"
 	"raft"
 	"sync"
+	"time"
 )
 
 const Debug = 0
@@ -17,11 +18,11 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
-
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
+	Command interface{}
 }
 
 type KVServer struct {
@@ -33,15 +34,108 @@ type KVServer struct {
 	maxraftstate int // snapshot if log grows this big
 
 	// Your definitions here.
+	store   map[string]string
+	replies map[int]chan raft.ApplyMsg // chan per log index
 }
 
+func (kv *KVServer) request(args interface{}) (raft.ApplyMsg, bool) {
+	var msg raft.ApplyMsg
+
+	op := Op{args}
+	index, _, isLeader := kv.rf.Start(op)
+
+	if !isLeader {
+		return msg, false
+	}
+
+	kv.replies[index] = make(chan raft.ApplyMsg, 1)
+
+	leaderCheckTicker := time.Tick(50 * time.Millisecond)
+
+	for {
+		select {
+		case msg = <-kv.replies[index]:
+			delete(kv.replies, index)
+			return msg, true
+		case <-leaderCheckTicker:
+			if _, isLeader := kv.rf.GetState(); !isLeader {
+				return msg, false
+			}
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
+}
 
 func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 	// Your code here.
+	msg, isLeader := kv.request(*args)
+
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+
+	reply.WrongLeader = false
+
+	if !msg.CommandValid {
+		reply.Err = "Invalid Message"
+		return
+	}
+
+	reply.Err = ""
+
+	val, ok := kv.store[args.Key]
+	if ok {
+		reply.Value = val
+	} else {
+		reply.Value = ""
+	}
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	// Your code here.
+	msg, isLeader := kv.request(*args)
+
+	if !isLeader {
+		reply.WrongLeader = true
+		return
+	}
+
+	reply.WrongLeader = false
+
+	if !msg.CommandValid {
+		reply.Err = "Invalid Message"
+		return
+	}
+
+	reply.Err = ""
+
+	if args.Op == "Put" {
+		kv.store[args.Key] = args.Value
+	} else { // "Append"
+		val, ok := kv.store[args.Key]
+		if !ok {
+			kv.store[args.Key] = val
+		} else {
+			kv.store[args.Key] = val + args.Value
+		}
+	}
+}
+
+func (kv *KVServer) run() {
+	for {
+		select {
+		case msg := <-kv.applyCh:
+			index := msg.CommandIndex
+			ch, ok := kv.replies[index]
+			if ok {
+				ch <- msg
+			}
+		default:
+			time.Sleep(10 * time.Millisecond)
+		}
+	}
 }
 
 //
@@ -79,11 +173,14 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
+	kv.replies = make(map[int]chan raft.ApplyMsg)
+	kv.store = make(map[string]string)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
+	go kv.run()
 
 	return kv
 }
