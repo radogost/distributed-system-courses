@@ -18,11 +18,24 @@ func DPrintf(format string, a ...interface{}) (n int, err error) {
 	return
 }
 
+type CommandType int
+
+const (
+	GetType CommandType = iota
+	PutType
+	AppendType
+)
+
 type Op struct {
 	// Your definitions here.
 	// Field names must start with capital letters,
 	// otherwise RPC will break.
-	Command interface{}
+	Type  CommandType
+	Key   string
+	Value string
+
+	ClientId  int64
+	RequestId int64
 }
 
 type KVServer struct {
@@ -36,29 +49,51 @@ type KVServer struct {
 	// Your definitions here.
 	store   map[string]string
 	replies map[int]chan raft.ApplyMsg // chan per log index
+
+	// stores last handled requestId per client
+	lastRequestId map[int64]int64
 }
 
 func (kv *KVServer) request(args interface{}) (raft.ApplyMsg, bool) {
 	var msg raft.ApplyMsg
 
-	op := Op{args}
+	var op Op
+	switch v := args.(type) {
+	case GetArgs:
+		op = Op{GetType, v.Key, "", v.ClientId, v.RequestId}
+	case PutAppendArgs:
+		if v.Op == "Put" {
+			op = Op{PutType, v.Key, v.Value, v.ClientId, v.RequestId}
+		} else {
+			op = Op{AppendType, v.Key, v.Value, v.ClientId, v.RequestId}
+		}
+	}
+
 	index, _, isLeader := kv.rf.Start(op)
 
 	if !isLeader {
 		return msg, false
 	}
 
-	kv.replies[index] = make(chan raft.ApplyMsg, 1)
+	kv.mu.Lock()
+	requestChan := make(chan raft.ApplyMsg, 1)
+	kv.replies[index] = requestChan
+	kv.mu.Unlock()
 
 	leaderCheckTicker := time.Tick(50 * time.Millisecond)
 
 	for {
 		select {
-		case msg = <-kv.replies[index]:
+		case msg := <-requestChan:
+			kv.mu.Lock()
 			delete(kv.replies, index)
+			kv.mu.Unlock()
 			return msg, true
 		case <-leaderCheckTicker:
 			if _, isLeader := kv.rf.GetState(); !isLeader {
+				kv.mu.Lock()
+				delete(kv.replies, index)
+				kv.mu.Unlock()
 				return msg, false
 			}
 		default:
@@ -85,7 +120,10 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 
 	reply.Err = ""
 
+	kv.mu.Lock()
 	val, ok := kv.store[args.Key]
+	kv.mu.Unlock()
+
 	if ok {
 		reply.Value = val
 	} else {
@@ -110,28 +148,35 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 	}
 
 	reply.Err = ""
-
-	if args.Op == "Put" {
-		kv.store[args.Key] = args.Value
-	} else { // "Append"
-		val, ok := kv.store[args.Key]
-		if !ok {
-			kv.store[args.Key] = val
-		} else {
-			kv.store[args.Key] = val + args.Value
-		}
-	}
 }
 
 func (kv *KVServer) run() {
 	for {
 		select {
 		case msg := <-kv.applyCh:
+			kv.mu.Lock()
+
+			op := msg.Command.(Op)
+			if op.Type == PutType || op.Type == AppendType {
+
+				prevRequestId, ok := kv.lastRequestId[op.ClientId]
+				if !ok || prevRequestId != op.RequestId {
+					if op.Type == PutType {
+						kv.store[op.Key] = op.Value
+					} else if op.Type == AppendType {
+						kv.store[op.Key] += op.Value
+					}
+					kv.lastRequestId[op.ClientId] = op.RequestId
+				}
+			}
+
 			index := msg.CommandIndex
 			ch, ok := kv.replies[index]
 			if ok {
 				ch <- msg
 			}
+
+			kv.mu.Unlock()
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
@@ -175,6 +220,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	// You may need initialization code here.
 	kv.replies = make(map[int]chan raft.ApplyMsg)
 	kv.store = make(map[string]string)
+	kv.lastRequestId = make(map[int64]int64)
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)

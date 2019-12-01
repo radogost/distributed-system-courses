@@ -7,7 +7,7 @@
   - [x] 2B
   - [x] 2C
 - [ ] [Lab3 - Key/Value Service](https://pdos.csail.mit.edu/6.824/labs/lab-kvraft.html)
-  - [ ] 3A
+  - [x] 3A
   - [ ] 3B
 - [ ] [Lab4 - Sharded Key/Value Service](https://pdos.csail.mit.edu/6.824/labs/lab-shard.html)
   - [ ] 4A
