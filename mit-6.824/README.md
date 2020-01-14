@@ -1,4 +1,4 @@
-# My solutions for [MIT 6.824](https://pdos.csail.mit.edu/6.824/index.html)
+# My solutions for [MIT 6.824](http://nil.csail.mit.edu/6.824/2018/)
 
 ## Progress
 - [x] [Lab1 - MapReduce](https://pdos.csail.mit.edu/6.824/labs/lab-1.html)
