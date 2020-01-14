@@ -1,6 +1,7 @@
 package raftkv
 
 import (
+	"bytes"
 	"labgob"
 	"labrpc"
 	"log"
@@ -38,6 +39,11 @@ type Op struct {
 	RequestId int64
 }
 
+type KVPersistentState struct {
+	Store         map[string]string
+	LastRequestId map[int64]int64
+}
+
 type KVServer struct {
 	mu      sync.Mutex
 	me      int
@@ -49,6 +55,8 @@ type KVServer struct {
 	// Your definitions here.
 	store   map[string]string
 	replies map[int]chan raft.ApplyMsg // chan per log index
+
+	persister *raft.Persister
 
 	// stores last handled requestId per client
 	lastRequestId map[int64]int64
@@ -156,6 +164,12 @@ func (kv *KVServer) run() {
 		case msg := <-kv.applyCh:
 			kv.mu.Lock()
 
+			if msg.IsSnapshot {
+				kv.loadSnapshot(msg.SnapshotData)
+				kv.mu.Unlock()
+				continue
+			}
+
 			op := msg.Command.(Op)
 			if op.Type == PutType || op.Type == AppendType {
 
@@ -176,10 +190,39 @@ func (kv *KVServer) run() {
 				ch <- msg
 			}
 
+			if kv.maxraftstate != -1 && kv.persister.RaftStateSize() >= kv.maxraftstate {
+				kv.takeLogSnapshot(index)
+			}
+
 			kv.mu.Unlock()
 		default:
 			time.Sleep(10 * time.Millisecond)
 		}
+	}
+}
+
+func (kv *KVServer) takeLogSnapshot(commandIndex int) {
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+
+	persistentState := &KVPersistentState{
+		Store:         kv.store,
+		LastRequestId: kv.lastRequestId,
+	}
+	e.Encode(persistentState)
+
+	kv.rf.TruncateLog(commandIndex, w.Bytes())
+}
+
+func (kv *KVServer) loadSnapshot(data []byte) {
+	if data != nil && len(data) > 0 {
+		r := bytes.NewBuffer(data)
+		d := labgob.NewDecoder(r)
+
+		persistentState := &KVPersistentState{}
+		d.Decode(persistentState)
+		kv.store = persistentState.Store
+		kv.lastRequestId = persistentState.LastRequestId
 	}
 }
 
@@ -221,6 +264,9 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 	kv.replies = make(map[int]chan raft.ApplyMsg)
 	kv.store = make(map[string]string)
 	kv.lastRequestId = make(map[int64]int64)
+	kv.persister = persister
+
+	kv.loadSnapshot(kv.persister.ReadSnapshot())
 
 	kv.applyCh = make(chan raft.ApplyMsg)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
