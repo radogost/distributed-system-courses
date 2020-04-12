@@ -572,6 +572,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Term:    term,
 		Command: command,
 	}
+
 	rf.logs = append(rf.logs, entry)
 	rf.matchIndex[rf.me] = index
 
@@ -661,6 +662,7 @@ func (rf *Raft) runCandidate() {
 		LastLogTerm:  lastLogTerm,
 		LastLogIndex: lastLogIndex,
 	}
+	rf.persist()
 
 	for i := range rf.peers {
 		if i == rf.me {
@@ -903,6 +905,7 @@ func (rf *Raft) replicateLogEntriesToPeer(peer int, prevLogIndex int, prevLogTer
 				)
 			}
 		}
+		rf.persist()
 	}()
 }
 
@@ -952,7 +955,7 @@ func (rf *Raft) TruncateLog(commandIndex int, snapshot []byte) {
 	rf.mu.Lock()
 	defer rf.mu.Unlock()
 
-	if commandIndex < rf.commitIndex { // don't snapshot uncommited data
+	if commandIndex > rf.commitIndex { // don't snapshot uncommited data
 		return
 	}
 
@@ -1031,6 +1034,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	// Your initialization code here (2A, 2B, 2C).
 	rf.applyCh = applyCh
 	rf.logger = log.New(os.Stdout, fmt.Sprintf("INFO (Node %d): ", rf.me), log.Ltime|log.Lshortfile)
+	//rf.logger.SetOutput(ioutil.Discard)
 	rf.votedFor = -1
 	rf.currentTerm = 0
 	rf.commitIndex = 0
