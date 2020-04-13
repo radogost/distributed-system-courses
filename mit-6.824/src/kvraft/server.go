@@ -88,7 +88,7 @@ func (kv *KVServer) request(args interface{}) (raft.ApplyMsg, bool) {
 	kv.replies[index] = requestChan
 	kv.mu.Unlock()
 
-	leaderCheckTicker := time.Tick(50 * time.Millisecond)
+	leaderCheckTicker := time.Tick(10 * time.Millisecond)
 
 	for {
 		select {
@@ -147,6 +147,7 @@ func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
 		reply.WrongLeader = true
 		return
 	}
+	//fmt.Printf("[Node %d] PUT/APPEND: %+v\n", kv.me, args)
 
 	reply.WrongLeader = false
 
@@ -258,6 +259,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv := new(KVServer)
 	kv.me = me
+	//kv.maxraftstate = 1
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.

@@ -19,12 +19,8 @@ package raft
 
 import (
 	"bytes"
-	"fmt"
-	"io/ioutil"
 	"labgob"
 	"labrpc"
-	"log"
-	"os"
 	"sort"
 	"sync"
 	"time"
@@ -79,8 +75,7 @@ type Raft struct {
 	// Look at the paper's Figure 2 for a description of what
 	// state a Raft server must maintain.
 	applyCh     chan ApplyMsg // required for lab
-	logger      *log.Logger
-	lastContact time.Time // time when follower has received last AppendEntries or RequestVoting
+	lastContact time.Time     // time when follower has received last AppendEntries or RequestVoting
 
 	// ServerState, one of {Follower, Candidate, Leader}
 	serverState ServerState
@@ -133,11 +128,6 @@ func (rf *Raft) setLastContact() {
 }
 
 func (rf *Raft) convertToFollower(term int) {
-	rf.logger.Printf(
-		"currentTerm: %d, receivedTerm: %d. Convert to follower",
-		rf.currentTerm,
-		term,
-	)
 	rf.votedFor = -1
 	rf.serverState = Follower
 	rf.currentTerm = term
@@ -213,7 +203,6 @@ func (rf *Raft) readPersist(data []byte) {
 	var persistentState RaftPersistentState
 
 	if d.Decode(&persistentState) != nil {
-		rf.logger.Println("Could not restore persisted state!")
 		return
 	}
 
@@ -532,8 +521,23 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 // the struct itself.
 //
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, reply *RequestVoteReply) bool {
-	ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
-	return ok
+	makeRequest := func(ch chan bool) {
+		ok := rf.peers[server].Call("Raft.RequestVote", args, reply)
+		ch <- ok
+	}
+
+	for attempt := 0; attempt < 5; attempt++ {
+		respCh := make(chan bool)
+		go makeRequest(respCh)
+		timeout := time.After(time.Duration(100) * time.Millisecond)
+		select {
+		case ok := <-respCh:
+			return ok
+		case <-timeout:
+		}
+	}
+
+	return false
 }
 
 //
@@ -563,6 +567,7 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		isLeader = false
 		return index, term, isLeader
 	}
+	//fmt.Printf("[Node %d] Received command: %+v, logs: %+v\n", rf.me, command, rf.logs)
 
 	lastIndex, _ := rf.LastEntry()
 	index = lastIndex + 1
@@ -589,7 +594,6 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 //
 func (rf *Raft) Kill() {
 	// Your code here, if desired.
-	rf.logger.SetOutput(ioutil.Discard)
 }
 
 func (rf *Raft) run() {
@@ -624,7 +628,6 @@ func (rf *Raft) runFollower() {
 				// We had successful contact, restart timer and continue
 				timeoutCh = time.After(electionTimeout)
 			} else {
-				rf.logger.Printf("No contact for %d ms!\n", contactGap/1000/1000)
 				rf.serverState = Candidate
 			}
 			rf.mu.Unlock()
@@ -636,7 +639,6 @@ func (rf *Raft) runFollower() {
 }
 
 func (rf *Raft) runCandidate() {
-	rf.logger.Printf("Starting election")
 
 	rf.mu.Lock()
 	replyCh := make(chan *RequestVoteReply, len(rf.peers))
@@ -709,13 +711,11 @@ func (rf *Raft) runCandidate() {
 			}
 
 			if receivedVotes >= rf.Majority() {
-				rf.logger.Println("Election won, convert to leader!")
 				rf.serverState = Leader
 			}
 			rf.mu.Unlock()
 
 		case <-timeoutCh:
-			rf.logger.Printf("Election timeout after %d ms!\n", electionTimeout/1000/1000)
 			return
 		default:
 			time.Sleep(10 * time.Millisecond)
@@ -1033,8 +1033,6 @@ func Make(peers []*labrpc.ClientEnd, me int,
 
 	// Your initialization code here (2A, 2B, 2C).
 	rf.applyCh = applyCh
-	rf.logger = log.New(os.Stdout, fmt.Sprintf("INFO (Node %d): ", rf.me), log.Ltime|log.Lshortfile)
-	//rf.logger.SetOutput(ioutil.Discard)
 	rf.votedFor = -1
 	rf.currentTerm = 0
 	rf.commitIndex = 0
