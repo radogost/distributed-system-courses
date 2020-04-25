@@ -140,14 +140,12 @@ func (kv *KVServer) Get(args *GetArgs, reply *GetReply) {
 }
 
 func (kv *KVServer) PutAppend(args *PutAppendArgs, reply *PutAppendReply) {
-	// Your code here.
 	msg, isLeader := kv.request(*args)
 
 	if !isLeader {
 		reply.WrongLeader = true
 		return
 	}
-	//fmt.Printf("[Node %d] PUT/APPEND: %+v\n", kv.me, args)
 
 	reply.WrongLeader = false
 
@@ -259,7 +257,6 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv := new(KVServer)
 	kv.me = me
-	//kv.maxraftstate = 1
 	kv.maxraftstate = maxraftstate
 
 	// You may need initialization code here.
@@ -270,7 +267,7 @@ func StartKVServer(servers []*labrpc.ClientEnd, me int, persister *raft.Persiste
 
 	kv.loadSnapshot(kv.persister.ReadSnapshot())
 
-	kv.applyCh = make(chan raft.ApplyMsg)
+	kv.applyCh = make(chan raft.ApplyMsg, 100)
 	kv.rf = raft.Make(servers, me, persister, kv.applyCh)
 
 	// You may need initialization code here.
