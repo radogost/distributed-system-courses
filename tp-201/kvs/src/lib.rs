@@ -1,9 +1,12 @@
 #![deny(missing_docs)]
 //! Key/Value store
-mod engine;
+mod client;
+mod engines;
 mod error;
-mod store;
+pub mod protocol;
+mod server;
 
-pub use engine::KvsEngine;
-pub use error::Result;
-pub use store::KvStore;
+pub use client::Client;
+pub use engines::{KvStore, KvsEngine, SledKvsEngine};
+pub use error::{KvsError, Result};
+pub use server::Server;

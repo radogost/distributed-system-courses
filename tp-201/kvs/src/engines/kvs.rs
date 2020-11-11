@@ -1,4 +1,6 @@
 //! A simple key-value store
+use super::write_engine_type;
+use crate::engines::KvsEngine;
 use crate::error::{KvsError, Result};
 
 use std::cell::RefCell;
@@ -58,53 +60,9 @@ impl KvStore {
                 "Expected path to be a directory!",
             )));
         }
+        write_engine_type(&path, "kvs")?;
 
         Self::setup(path)
-    }
-
-    /// Returns a value for the given key
-    pub fn get(&mut self, key: String) -> Result<Option<String>> {
-        let command = self
-            .readers
-            .get(&key)
-            .map(|(reader, offset)| {
-                let mut reader = reader.borrow_mut();
-                reader.read_command(*offset)
-            })
-            .transpose()?;
-
-        match command {
-            Some(Command::Remove { key: _ }) => unreachable!(),
-            Some(Command::Set { key: _, value }) => Ok(Some(value)),
-            None => Ok(None),
-        }
-    }
-
-    /// Sets the value for a given key
-    pub fn set(&mut self, key: String, value: String) -> Result<()> {
-        let command = Command::Set {
-            key: key.clone(),
-            value: value.clone(),
-        };
-        let offset = self.write_command(command)?;
-        let reader = Rc::clone(&self.current_gen_reader);
-        self.readers.insert(key, (reader, offset));
-        self.compact()?;
-
-        Ok(())
-    }
-
-    /// Removes a key from the KvStore
-    pub fn remove(&mut self, key: String) -> Result<()> {
-        if self.readers.contains_key(&key) {
-            let command = Command::Remove { key: key.clone() };
-            self.write_command(command)?;
-            self.readers.remove(&key);
-            self.compact()?;
-            Ok(())
-        } else {
-            Err(KvsError::NoSuchKey(key))
-        }
     }
 
     fn setup(path: PathBuf) -> Result<Self> {
@@ -239,6 +197,50 @@ impl KvStore {
         }
 
         Ok((lines, command_readers))
+    }
+}
+
+impl KvsEngine for KvStore {
+    fn get(&mut self, key: String) -> Result<Option<String>> {
+        let command = self
+            .readers
+            .get(&key)
+            .map(|(reader, offset)| {
+                let mut reader = reader.borrow_mut();
+                reader.read_command(*offset)
+            })
+            .transpose()?;
+
+        match command {
+            Some(Command::Remove { key: _ }) => unreachable!(),
+            Some(Command::Set { key: _, value }) => Ok(Some(value)),
+            None => Ok(None),
+        }
+    }
+
+    fn set(&mut self, key: String, value: String) -> Result<()> {
+        let command = Command::Set {
+            key: key.clone(),
+            value: value.clone(),
+        };
+        let offset = self.write_command(command)?;
+        let reader = Rc::clone(&self.current_gen_reader);
+        self.readers.insert(key, (reader, offset));
+        self.compact()?;
+
+        Ok(())
+    }
+
+    fn remove(&mut self, key: String) -> Result<()> {
+        if self.readers.contains_key(&key) {
+            let command = Command::Remove { key: key.clone() };
+            self.write_command(command)?;
+            self.readers.remove(&key);
+            self.compact()?;
+            Ok(())
+        } else {
+            Err(KvsError::NoSuchKey(key))
+        }
     }
 }
 
